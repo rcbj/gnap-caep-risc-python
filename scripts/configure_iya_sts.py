@@ -488,6 +488,14 @@ def main(argv=None):
             continue
         answered = api(call["path"][len(f"{base}/admin-api"):], call["body"])
         errors = " ".join(_errors(answered["body"]))
+        # Current iya-sts main accepts access_token, id_token, userinfo,
+        # saml2, saml11, and kerberos-pac. gnap_access_token is newer. The
+        # uid claim is not required to sign in.
+        if (call["path"].endswith("/applications/set-custom-claim")
+                and not answered["body"].get("ok")
+                and "not one of" in errors):
+            print(f"  {call['why']}: this iya-sts has no {call['body'].get('set')} claim set; continuing.")
+            continue
         if not answered["body"].get("ok") and "already" not in errors.lower():
             raise RuntimeError(f"{call['why']}: refused: {json.dumps(answered['body'])[:400]}")
         if not answered["body"].get("ok"):
