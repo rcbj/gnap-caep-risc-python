@@ -542,6 +542,8 @@ def main(argv=None):
     print(f"grant:       {files['grantEndpoint']}")
     print(f"finish:      {files['finishUri']}")
     print(f"proof:       {files['keyProof']}")
+    if files.get("tlsCa"):
+        print("The demo image build copies that trust chain in. Rebuild it after running this against another iya-sts.")
     print("Done. Start the demo with: docker compose up --build")
     return 0
 
