@@ -49,8 +49,9 @@ def usage():
                   URI follows the running demo's PORT, then $PORT. A non-loopback finish URI is
                   left as written.
   --test-user     The test user to create (default: gnap-demo-user). Its password is
-                  $GNAP_DEMO_USER_PASSWORD, or one is generated and printed once. With that variable
-                  set, an existing user's password is replaced.
+                  $GNAP_DEMO_USER_PASSWORD, or one is generated and written to
+                  demo/generated/<user>.password (mode 0600); only the path is printed.
+                  With $GNAP_DEMO_USER_PASSWORD set, an existing user's password is replaced.
   --no-test-user  Do not create a test user.
   --dry-run       Print what would be done, and send nothing.
 
@@ -317,6 +318,25 @@ def _errors(body):
     return [str(item) for item in raw]
 
 
+def save_password(directory, username, password):
+    """Write a generated password to <directory>/<username>.password, mode 0600.
+
+    Never printed: a password does not belong in a log. The file is created 0600 (never
+    readable by anyone else, not even for a moment) beside the client key in demo/generated,
+    which never enters an image. An existing file is narrowed to 0600 before it is rewritten.
+    """
+    if not username or "/" in username or "\\" in username or username in (".", ".."):
+        raise ValueError(f"{username!r} cannot name a password file")
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    saved = directory / f"{username}.password"
+    descriptor = os.open(saved, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as out:
+        os.fchmod(out.fileno(), 0o600)
+        out.write(password + "\n")
+    return saved
+
+
 def mint_admin_token(base, secret):
     form = f"grant_type=client_credentials&scope={quote('admin:read admin:write')}&resource={quote(base + '/admin-api', safe='')}"
     basic = base64.b64encode(f"sts-api-client:{secret}".encode()).decode()
@@ -529,7 +549,8 @@ def main(argv=None):
                 raise RuntimeError(f"creating {args['test_user']} was refused: {json.dumps(made['body'])[:300]}")
             print(f"Created user {args['test_user']}.")
             if made["body"].get("password"):
-                print(f"Generated password for {args['test_user']} (shown once): {made['body']['password']}")
+                saved = save_password(Path(args["config"]).resolve().parent / "generated", args["test_user"], made["body"]["password"])
+                print(f"Generated a password for {args['test_user']}; it is in {saved} (readable by you only).")
         for call in plan:
             if not call["path"].endswith("/groups/add-member"):
                 continue

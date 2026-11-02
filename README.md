@@ -74,6 +74,8 @@ docker compose build
 
 The second build bakes in the trust chain the install script saved.
 
+The install script creates the test user `gnap-demo-user`. Its password is `$GNAP_DEMO_USER_PASSWORD`, or iya-sts generates one; the script writes a generated password to `demo/generated/gnap-demo-user.password` (mode 0600) and prints only that path, never the password.
+
 `--dry-run` prints the admin API calls and sends nothing. When the `gnap-demo` container is running, its `PORT` wins over the shell `PORT`.
 
 ## License

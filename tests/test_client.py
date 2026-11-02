@@ -295,6 +295,7 @@ def start_server(client_cert_pem):
                 raise
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert_file.name, key_file.name)
     context.verify_mode = ssl.CERT_OPTIONAL
     context.load_verify_locations(cadata=client_key.certificate_pem)
