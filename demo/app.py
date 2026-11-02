@@ -3,12 +3,13 @@
 
 """A small GNAP sign-in demo. The private key stays in this process. Tokens stay off the browser.
 
-GET  /healthz    200 and the body ok. This does not read the client key.
-GET  /           a page with a sign-in control, or the signed-in page
-GET  /login      starts a grant and redirects the browser
-GET  /callback   finishes the redirect
-POST /logout     signs this browser out of this application
-POST /gnap/push  a push finish
+GET  /healthz      200 and the body ok. This does not read the client key.
+GET  /live-status  JSON: signedIn, subject, receiver, and accepted events. No tokens.
+GET  /             a page with a sign-in control, or the signed-in page
+GET  /login        starts a grant and redirects the browser
+GET  /callback     finishes the redirect
+POST /logout       signs this browser out of this application
+POST /gnap/push    a push finish
 
 PORT is the bind port (default 3000). A loopback finish URI and display URI follow that port.
 PUBLIC_URL or --public-url replaces the origin and keeps the path. pollIntervalMs is the Shared
@@ -29,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from gnap_caep_risc import GnapClient, GnapError, SignalsReceiver, tracked_from_person  # noqa: E402
+from gnap_caep_risc import GnapClient, GnapError, MemorySessionIndex, SignalsReceiver, tracked_from_person  # noqa: E402
 from redirects import redirects_for  # noqa: E402
 
 CONFIG = Path(os.environ.get("GNAP_CONFIG") or (HERE / "gnap.json"))
@@ -57,7 +58,19 @@ GNAP = None
 GNAP_ERROR = None
 SESSION = {}
 RECEIVER = None
+RECEIVER_STATE = ""
 LATEST = None
+EVENTS = []
+
+
+class _SessionIndex(MemorySessionIndex):
+    """An ending event names an IdP session. A sign-in that recorded none still ends."""
+
+    def by_idp_session(self, idp_session):
+        found = super().by_idp_session(idp_session)
+        if found:
+            return found
+        return self._find(lambda session: not session.idp_session)
 
 
 def _b64(data: bytes) -> str:
@@ -148,37 +161,64 @@ def _signals_wanted():
     return ssf
 
 
-def _watch(grant, person):
-    global RECEIVER, LATEST
+def _remember_event(event):
+    EVENTS.append({"type": event.type, "jti": event.jti})
+
+
+def _subject_label(person):
+    if person is None:
+        return None
+    for name in ("preferred_username", "email", "name", "uid", "sub"):
+        value = getattr(person, name, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _watch(local_id, grant, person):
+    global RECEIVER, RECEIVER_STATE, LATEST
     LATEST = grant
     wanted = _signals_wanted()
-    if not wanted or RECEIVER is not None:
+    if not wanted:
+        if not RECEIVER_STATE:
+            RECEIVER_STATE = "not configured (no ssf block in the configuration file)"
         return
-    interval = wanted.get("pollIntervalMs") or 5000
+    if RECEIVER is None:
+        interval = wanted.get("pollIntervalMs") or 5000
 
-    def headers(request):
-        if LATEST is None:
-            return {}
-        return client().authorization_headers(LATEST, request["method"], request["url"], request.get("body"))
+        def headers(request):
+            if LATEST is None:
+                return {}
+            return client().authorization_headers(LATEST, request["method"], request["url"], request.get("body"))
 
-    def ended(ids, event):
-        for local_id in ids:
-            SESSION.pop(local_id, None)
+        def ended(ids, event):
+            for one in ids:
+                SESSION.pop(one, None)
 
-    RECEIVER = SignalsReceiver(
-        wanted["transmitter"],
-        ended,
-        tls=client().tls(),
-        headers=headers,
-        poll_interval_ms=interval,
-    )
-    try:
-        RECEIVER.start()
-        if person is not None:
-            RECEIVER.track(tracked_from_person(grant.grant_id or person.sub, person, grant.expires_at))
-    except Exception as err:
-        print(f"ssf: not started: {err}")
-        RECEIVER = None
+        receiver = SignalsReceiver(
+            wanted["transmitter"],
+            ended,
+            tls=client().tls(),
+            headers=headers,
+            description=f"gnap-caep-risc demo ({client().config.application})",
+            poll_interval_ms=interval,
+            session_index=_SessionIndex(),
+        )
+        receiver.on("*", _remember_event)
+        RECEIVER = receiver
+        try:
+            receiver.start()
+            stream = receiver.stream or {}
+            RECEIVER_STATE = f"polling stream {stream.get('stream_id')} at {wanted['transmitter']}"
+        except Exception as err:
+            print(f"ssf: not started: {err}")
+            RECEIVER = None
+            RECEIVER_STATE = f"not running: {err}"
+    if RECEIVER is None or person is None or not local_id:
+        return
+    if not getattr(person, "sid", None):
+        print("ssf: the sign-in has no IdP session id; an ending event still clears this local session")
+    RECEIVER.track(tracked_from_person(local_id, person, grant.expires_at))
 
 
 def _page(title, body):
@@ -248,6 +288,9 @@ class Demo(BaseHTTPRequestHandler):
             if path == "/healthz" and method == "GET":
                 self._send(200, "ok", {"content-type": "text/plain"})
                 return
+            if path == "/live-status" and method == "GET":
+                self._live_status()
+                return
             if path == "/styles.css" and method == "GET":
                 self._static("styles.css", "text/css; charset=utf-8")
                 return
@@ -280,6 +323,17 @@ class Demo(BaseHTTPRequestHandler):
         if not isinstance(opened, dict):
             return None
         return SESSION.get(opened.get("id"))
+
+    def _live_status(self):
+        session = self._session()
+        person = session["person"] if session else None
+        body = {
+            "signedIn": bool(session),
+            "subject": _subject_label(person),
+            "receiver": RECEIVER_STATE,
+            "events": [{"type": item.get("type"), "jti": item.get("jti")} for item in list(EVENTS)],
+        }
+        self._send(200, json.dumps(body), {"content-type": "application/json", "cache-control": "no-store"})
 
     def _home(self):
         gnap = try_client()
@@ -324,7 +378,6 @@ class Demo(BaseHTTPRequestHandler):
             if done.grant.subject is None:
                 raise GnapError("validation", "the grant has no subject")
             self._place(done.grant, clear)
-            _watch(done.grant, done.grant.subject)
         except Exception as err:
             print(f"sign-in refused: {err}")
             self._send(400, _page("Sign-in failed", f"<h1>Sign-in failed</h1><p>{_esc(err)}</p><p><a href=\"/\">Start again</a></p>"), {"set-cookie": clear})
@@ -332,6 +385,8 @@ class Demo(BaseHTTPRequestHandler):
     def _place(self, grant, extra=None):
         local = secrets.token_urlsafe(12)
         SESSION[local] = {"person": grant.subject, "grant": grant}
+        if grant.subject is not None:
+            _watch(local, grant, grant.subject)
         cookies = [f"gsid={seal({'id': local})}; Path=/; HttpOnly; SameSite=Lax"]
         if extra:
             cookies.append(extra)
@@ -341,10 +396,11 @@ class Demo(BaseHTTPRequestHandler):
         token = _cookie(self.headers.get("cookie"), "gsid")
         opened = unseal(token)
         if isinstance(opened, dict):
-            session = SESSION.pop(opened.get("id"), None)
-            if session and RECEIVER is not None and session["grant"].grant_id:
+            local = opened.get("id")
+            session = SESSION.pop(local, None)
+            if session and RECEIVER is not None and local:
                 try:
-                    RECEIVER.untrack(session["grant"].grant_id)
+                    RECEIVER.untrack(local)
                 except Exception:
                     pass
             if session:
@@ -363,7 +419,7 @@ class Demo(BaseHTTPRequestHandler):
             text = self._read().decode()
             done = client().finish_push(json.loads(text) if text else None)
             if done.grant.subject is not None:
-                _watch(done.grant, done.grant.subject)
+                _watch(done.grant.grant_id or done.grant.subject.sub, done.grant, done.grant.subject)
             self._send(204, "", {"cache-control": "no-store"})
         except Exception as err:
             self._send(400, json.dumps({"error": str(err)}), {"content-type": "application/json"})

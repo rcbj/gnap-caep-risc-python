@@ -10,7 +10,11 @@ The private key stays in this process. The same `gnap.json` shape as the Node li
 docker build --target test .
 ```
 
-The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions uses that command. Do not run pytest on the host. The demo image does not run the suite.
+The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions on a push uses that command. Do not run pytest on the host. The demo image does not run the suite.
+
+Those tests use an in-process stub. They do not start iya-sts.
+
+`python3 scripts/live_iya_sts.py` is the live half. It builds this demo image, registers it with iya-sts, signs in, and requires a credential-change event and a session-revoked event on `GET /live-status`. The second event ends the local session. When `IYA_STS_URL` is unset it starts the latest main branch of iya-sts in memory mode, with persistence and clustering off. It uses the host's Python and Docker and does not import this library. It binds two high ports and never binds 3000 or 8081. The nightly workflow runs the unit suite and this script once every 24 hours.
 
 PyPI publishing is not set up yet.
 
@@ -42,7 +46,7 @@ done = gnap.finish_redirect(query, [started.pending.id])
 docker compose up --build
 ```
 
-`PORT` defaults to 3000 and is the bind port. Loopback finish and display URLs follow `PORT`. Any other host is left as written. `PUBLIC_URL` or `--public-url` replaces the origin and keeps the path. `GET /healthz` returns `ok`. The home page has a sign-in control; `/login` starts a grant, `/callback` finishes it, and `POST /logout` signs out.
+`PORT` defaults to 3000 and is the bind port. Loopback finish and display URLs follow `PORT`. Any other host is left as written. `PUBLIC_URL` or `--public-url` replaces the origin and keeps the path. `GET /healthz` returns `ok`. The home page has a sign-in control; `/login` starts a grant, `/callback` finishes it, and `POST /logout` signs out. `GET /live-status` is JSON: `signedIn`, `subject`, the receiver state, and the Shared Signals events this process has accepted (`type` and `jti` only). It does not include tokens. Do not bind port 3000 or 8081 while something else is already using them.
 
 The shipped `demo/gnap.json` leaves `signals` on by omitting the key. Key material is `file:` or `env:` and is not in the tree. Generate a key inside the demo image, then register the application:
 

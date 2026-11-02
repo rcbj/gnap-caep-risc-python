@@ -16,9 +16,11 @@ done = gnap.finish_redirect(query, [started.pending.id])
 docker build --target test .
 ```
 
-The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions uses that command. Do not run pytest on the host. The demo image does not run the suite.
+The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions on a push uses that command. Do not run pytest on the host. The demo image does not run the suite.
 
-Tests use an in-process stub on 127.0.0.1. They do not need a live authorization server.
+Tests use an in-process stub on 127.0.0.1. They do not start iya-sts.
+
+`python3 scripts/live_iya_sts.py` signs the demo in to iya-sts and checks a credential-change event and a session-revoked event on `GET /live-status`. The nightly workflow runs the unit suite and that script once every 24 hours. It does not bind port 3000 or 8081. Push CI stays the unit suite.
 
 ## Layout
 
@@ -29,7 +31,7 @@ Tests use an in-process stub on 127.0.0.1. They do not need a live authorization
 
 ## Demo
 
-`PORT` defaults to 3000 and is the bind port. Loopback redirect and finish URLs follow `PORT`. `PUBLIC_URL` or `--public-url` replaces the origin and keeps the path. `GET /healthz` returns `ok`. `ssf.pollIntervalMs` is a millisecond interval.
+`PORT` defaults to 3000 and is the bind port. Loopback redirect and finish URLs follow `PORT`. `PUBLIC_URL` or `--public-url` replaces the origin and keeps the path. `GET /healthz` returns `ok`. `GET /live-status` reports whether this process is signed in and the Shared Signals events it has accepted, without tokens. `ssf.pollIntervalMs` is a millisecond interval. Do not bind port 3000 or 8081 while something else is already using them.
 
 ## Signals
 
