@@ -28,6 +28,7 @@ Tests use an in-process stub on 127.0.0.1. They do not start iya-sts.
 - `tests/` config, subject, client, the Shared Signals receiver, and `test_trust_chain.py` (the install script writes the whole chain to `tlsCa`'s path; the library trusts an HTTPS server through that file)
 - `demo/app.py` the HTTP demo; `demo/gnap.json` the sample configuration
 - `scripts/configure_iya_sts.py` registers the app and writes the listener CA trust chain to the file `tlsCa` names; `scripts/trust_chain.py` holds `save_trust_chain()` and refreshes that file; `scripts/redirects.py` supports it
+- Scripts never print a secret: a generated test-user password goes to `demo/generated/<user>.password` (created 0600) and only the path is printed; no trace line carries a URL or value derived from a password; secrets reach `docker run` as `-e NAME` from the child environment; every `ssl.SSLContext` sets `minimum_version = TLSv1_2`
 
 ## The iya-sts trust chain (`tlsCa`)
 
