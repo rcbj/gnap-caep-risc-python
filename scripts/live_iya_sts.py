@@ -15,6 +15,15 @@ It does not import this library. Do not point it at port 3000 or 8081.
 IYA_STS_URL, when set, uses an iya-sts that is already running and does not
 stop it. Otherwise the script clones main (or builds IYA_STS_SRC) and removes
 the container it started.
+
+The trust chain goes in the way a user's does. The script copies this
+checkout to a scratch build context (without demo/generated), generates the
+client key and runs the install script there, which writes the listener CA
+trust chain to the file tlsCa names, and only then builds the demo image,
+which carries that file from build time. The demo container gets no CA mount
+(only the client key and certificate, one file each) and does not refresh the
+chain at start (TLS_CA_REFRESH=0). tlsCa is never rewritten. This script reads
+the saved chain for its own HTTPS client.
 """
 
 import base64
@@ -41,7 +50,7 @@ STS_REPO = "https://github.com/rcbj/iya-sts.git"
 CAEP = "https://schemas.openid.net/secevent/caep/event-type/"
 CREDENTIAL_CHANGE = CAEP + "credential-change"
 SESSION_REVOKED = CAEP + "session-revoked"
-FORBIDDEN_PORTS = {3000, 8081}
+FORBIDDEN_PORTS = {3000, 8081, *range(18481, 18496)}
 
 PROFILE = {
     "repo": "gnap-caep-risc-python",
@@ -197,19 +206,40 @@ def wait_port(port, timeout):
     raise RuntimeError(f"127.0.0.1:{port} did not accept a connection")
 
 
-def fetch_ca(origin, dest):
+def wait_ready(origin, timeout):
+    """Wait for iya-sts discovery to answer. Readiness only: nothing is trusted from it."""
     parts = urllib.parse.urlsplit(origin)
     context = ssl._create_unverified_context()
-    conn = http.client.HTTPSConnection(parts.hostname, parts.port or 443, context=context, timeout=30)
-    try:
-        conn.request("GET", "/tls/server-certificate")
-        response = conn.getresponse()
-        body = response.read()
-    finally:
-        conn.close()
-    if response.status != 200 or b"BEGIN CERTIFICATE" not in body:
-        raise RuntimeError(f"GET /tls/server-certificate answered {response.status}")
-    dest.write_bytes(body)
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        conn = http.client.HTTPSConnection(parts.hostname, parts.port or 443, context=context, timeout=10)
+        try:
+            conn.request("GET", (parts.path or "").rstrip("/") + "/.well-known/openid-configuration")
+            response = conn.getresponse()
+            response.read()
+            if response.status == 200:
+                return
+            last = f"answered {response.status}"
+        except OSError as err:
+            last = str(err)
+        finally:
+            conn.close()
+        time.sleep(2)
+    raise RuntimeError(f"{origin} discovery did not answer 200: {last}")
+
+
+def copy_context(dest):
+    """This checkout as a build context, without demo/generated or local clutter."""
+    clutter = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist"}
+
+    def ignore(directory, names):
+        skipped = {name for name in names if name in clutter or name.endswith(".egg-info")}
+        if Path(directory).resolve() == (ROOT / "demo").resolve() and "generated" in names:
+            skipped.add("generated")
+        return skipped
+
+    shutil.copytree(ROOT, dest, ignore=ignore)
 
 
 def _swap_origin(value, origin):
@@ -224,6 +254,7 @@ def _localhost_8081(value):
 
 
 def rewrite_config(source, dest, sts_origin, demo_origin):
+    """Point the demo at this iya-sts and this demo origin. tlsCa is left alone."""
     raw = json.loads(source.read_text(encoding="utf-8"))
     sts = sts_origin.rstrip("/")
     demo = demo_origin.rstrip("/")
@@ -545,7 +576,7 @@ def prepare_sts(sts_port, secret):
         "-e", "STS_CLUSTER_MODE=off",
         "-e", "STS_WORKERS_REQUEST_COUNT=0",
         "-e", "STS_WORKERS_SURFACE_COUNT=0",
-        "-e", f"STS_ADMIN_API_CLIENT_SECRET={secret}",
+        "-e", "STS_ADMIN_API_CLIENT_SECRET",
         "-e", "STS_LOG_LEVEL=info",
         image,
     )
@@ -553,13 +584,17 @@ def prepare_sts(sts_port, secret):
 
 
 def main():
-    sts_port = int(os.environ.get("LIVE_STS_PORT") or 18481)
-    demo_port = int(os.environ.get("LIVE_DEMO_PORT") or 18083)
+    sts_port = int(os.environ.get("LIVE_STS_PORT") or 18542)
+    demo_port = int(os.environ.get("LIVE_DEMO_PORT") or 18642)
     if sts_port in FORBIDDEN_PORTS or demo_port in FORBIDDEN_PORTS or sts_port == demo_port:
-        raise SystemExit("LIVE_STS_PORT and LIVE_DEMO_PORT must be two high ports other than 3000 and 8081")
+        raise SystemExit("LIVE_STS_PORT and LIVE_DEMO_PORT must be two high ports other than 3000, 8081 and 18481-18495")
     secret = os.environ.get("ADMIN_API_CLIENT_SECRET") or os.environ.get("STS_ADMIN_API_CLIENT_SECRET") or secrets.token_urlsafe(24)
     password = os.environ.get(PROFILE["password_env"]) or secrets.token_urlsafe(18)
     username = PROFILE["test_user"]
+    # Secrets reach docker as -e NAME from this environment, never on a printed command line.
+    os.environ["ADMIN_API_CLIENT_SECRET"] = secret
+    os.environ["STS_ADMIN_API_CLIENT_SECRET"] = secret
+    os.environ[PROFILE["password_env"]] = password
     sts_origin, sts_name = prepare_sts(sts_port, secret)
     demo_origin = f"http://127.0.0.1:{demo_port}"
     demo_name = PROFILE["repo"] + "-live-demo"
@@ -567,36 +602,26 @@ def main():
     work = Path(tempfile.mkdtemp(prefix=PROFILE["repo"] + "-live-"))
     try:
         wait_port(urllib.parse.urlsplit(sts_origin).port or 443, 120)
-        ca_file = work / "idp-ca.pem"
-        deadline = time.time() + 90
-        last_error = None
-        while time.time() < deadline:
-            try:
-                fetch_ca(sts_origin, ca_file)
-                last_error = None
-                break
-            except Exception as err:
-                last_error = err
-                time.sleep(2)
-        if last_error:
-            raise last_error
-        config = work / "gnap.json"
-        rewrite_config(ROOT / PROFILE["config_file"], config, sts_origin, demo_origin)
-        docker("build", "-t", image, str(ROOT))
-        env = [
-            "-e", f"ADMIN_API_CLIENT_SECRET={secret}",
-            "-e", f"STS_ADMIN_API_CLIENT_SECRET={secret}",
-            "-e", f"{PROFILE['password_env']}={password}",
-            "-e", f"PORT={demo_port}",
-            "-e", f"PUBLIC_URL={demo_origin}",
-            "-e", "GNAP_CONFIG=/work/gnap.json",
+        wait_ready(sts_origin, 90)
+        context = work / "context"
+        copy_context(context)
+        config = context / PROFILE["config_file"]
+        rewrite_config(config, config, sts_origin, demo_origin)
+        tls_ca = json.loads(config.read_text(encoding="utf-8")).get("tlsCa")
+        chain_file = config.parent / tls_ca
+        generated_dir = config.parent / "generated"
+        # The key and the install script run in the image, before the chain exists.
+        docker("build", "-t", image, str(context))
+        in_image = [
+            "run", "--rm", "--network", "host",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "-v", f"{config.parent}:/app/demo",
         ]
         generated = docker(
-            "run", "--rm", "--network", "host",
-            "-v", f"{work}:/work",
+            *in_image,
             "--entrypoint", "gnap-caep-risc",
             image,
-            "generate-key", "--config", "/work/gnap.json",
+            "generate-key", "--config", "/app/" + PROFILE["config_file"],
             capture_output=True,
         )
         if generated.stdout:
@@ -604,13 +629,13 @@ def main():
         if generated.stderr:
             print(generated.stderr, file=sys.stderr, flush=True)
         configure = docker(
-            "run", "--rm", "--network", "host",
-            "-v", f"{work}:/work",
-            *env,
+            *in_image,
+            "-e", "ADMIN_API_CLIENT_SECRET",
+            "-e", PROFILE["password_env"],
             "--entrypoint", PROFILE["configure"][0],
             image,
             *PROFILE["configure"][1:],
-            "--config", "/work/gnap.json",
+            "--config", "/app/" + PROFILE["config_file"],
             "--idp", sts_origin,
             "--public-url", demo_origin,
             "--test-user", username,
@@ -620,11 +645,31 @@ def main():
             print(configure.stdout, flush=True)
         if configure.stderr:
             print(configure.stderr, file=sys.stderr, flush=True)
+        if "BEGIN CERTIFICATE" not in (chain_file.read_text(encoding="utf-8") if chain_file.exists() else ""):
+            raise RuntimeError(f"the install script did not write tlsCa's file {tls_ca}")
+        # The demo image, built after the install script, carries the chain and no key.
+        docker("build", "-t", image, str(context))
+        baked = docker(
+            "run", "--rm", "--entrypoint", "cat", image, f"/app/demo/{tls_ca}",
+            capture_output=True,
+        ).stdout
+        if baked != chain_file.read_text(encoding="utf-8"):
+            raise RuntimeError(f"the demo image's /app/demo/{tls_ca} is not the chain the install script saved")
+        listed = docker(
+            "run", "--rm", "--entrypoint", "ls", image, "-A", "/app/demo/generated",
+            capture_output=True,
+        ).stdout.split()
+        if listed != [Path(tls_ca).name]:
+            raise RuntimeError(f"the demo image's /app/demo/generated holds {listed}, not only the trust chain")
+        print(f"the demo image carries {tls_ca} from build time, and no key", flush=True)
         subprocess.run(["docker", "rm", "-f", demo_name], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         docker(
             "run", "-d", "--name", demo_name, "--network", "host",
-            "-v", f"{work}:/work",
-            *env,
+            "-v", f"{generated_dir / 'client.key'}:/app/demo/generated/client.key:ro",
+            "-v", f"{generated_dir / 'client.crt'}:/app/demo/generated/client.crt:ro",
+            "-e", f"PORT={demo_port}",
+            "-e", f"PUBLIC_URL={demo_origin}",
+            "-e", "TLS_CA_REFRESH=0",
             image,
             "python", "demo/app.py", "--public-url", demo_origin,
         )
@@ -645,7 +690,7 @@ def main():
             time.sleep(1)
         if not healthy:
             raise RuntimeError("the demo /healthz did not answer ok")
-        client = Client(ca_file)
+        client = Client(chain_file)
         driver = Driver(client, sts_origin, demo_origin, username, password)
         driver.sign_in()
         signed_in = wait_for(
@@ -672,7 +717,12 @@ def main():
             ),
             "session-revoked to end the local session",
         )
-        print(json.dumps({"ok": True, "subject": signed_in.get("subject"), "events": finished.get("events")}, indent=2))
+        print(json.dumps({
+            "ok": True,
+            "subject": signed_in.get("subject"),
+            "trustChain": f"demo/{tls_ca}, baked into the demo image",
+            "events": finished.get("events"),
+        }, indent=2))
     finally:
         subprocess.run(["docker", "rm", "-f", demo_name], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if sts_name:
