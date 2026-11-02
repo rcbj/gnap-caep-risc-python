@@ -318,23 +318,30 @@ def _errors(body):
     return [str(item) for item in raw]
 
 
-def save_password(directory, username, password):
-    """Write a generated password to <directory>/<username>.password, mode 0600.
+def generated_file(directory, username):
+    """The file a generated test-user password is written to: <directory>/<username>.password.
 
-    Never printed: a password does not belong in a log. The file is created 0600 (never
-    readable by anyone else, not even for a moment) beside the client key in demo/generated,
-    which never enters an image. An existing file is narrowed to 0600 before it is rewritten.
+    Computed apart from the password, so the path the script prints is not derived from it.
     """
     if not username or "/" in username or "\\" in username or username in (".", ".."):
-        raise ValueError(f"{username!r} cannot name a password file")
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    saved = directory / f"{username}.password"
-    descriptor = os.open(saved, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        raise ValueError(f"{username!r} cannot name a file")
+    return Path(directory) / f"{username}.password"
+
+
+def write_private(path, text):
+    """Write text to path, readable and writable by its owner only (0600).
+
+    The file is created 0600, so it is never readable by anyone else, not even for a moment;
+    an existing file is narrowed to 0600 before it is rewritten. A generated password goes
+    here and is never printed: a password does not belong in a log. demo/generated, beside
+    the client key, never enters an image.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as out:
         os.fchmod(out.fileno(), 0o600)
-        out.write(password + "\n")
-    return saved
+        out.write(text + "\n")
 
 
 def mint_admin_token(base, secret):
@@ -549,7 +556,8 @@ def main(argv=None):
                 raise RuntimeError(f"creating {args['test_user']} was refused: {json.dumps(made['body'])[:300]}")
             print(f"Created user {args['test_user']}.")
             if made["body"].get("password"):
-                saved = save_password(Path(args["config"]).resolve().parent / "generated", args["test_user"], made["body"]["password"])
+                saved = generated_file(Path(args["config"]).resolve().parent / "generated", args["test_user"])
+                write_private(saved, made["body"]["password"])
                 print(f"Generated a password for {args['test_user']}; it is in {saved} (readable by you only).")
         for call in plan:
             if not call["path"].endswith("/groups/add-member"):

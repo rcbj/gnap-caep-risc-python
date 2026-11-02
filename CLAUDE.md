@@ -54,4 +54,4 @@ Omitted or `true` keeps CAEP and RISC on, and the resolved configuration omits `
 
 MIT. Copyright (c) 2026 Iya CyberSecurity Solutions, LLC.
 
-`develop` and `main` must be the same commit.
+`develop` and `main` must be the same commit. A pull request merged into `main` publishes the package to PyPI after the test workflow succeeds on that commit. A direct push does not. There is no API token: PyPI Trusted Publishing trades the workflow's GitHub OIDC token for a short-lived upload token, from the `pypi` environment, and PyPI holds the publisher for this repository and `publish.yml`. A version already on PyPI stays there; the next release is a new `version` in `pyproject.toml` (and `VERSION`).
