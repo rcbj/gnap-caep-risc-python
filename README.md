@@ -16,7 +16,7 @@ Those tests use an in-process stub. They do not start iya-sts.
 
 `python3 scripts/live_iya_sts.py` is the live half. It copies this checkout to a scratch build context, generates the client key and runs the install script there (which writes the `tlsCa` chain), then builds this demo image from it, checks the image carries the chain and no key, starts the demo with no CA mount and `TLS_CA_REFRESH=0`, signs in, and requires a credential-change event and a session-revoked event on `GET /live-status`. The second event ends the local session. When `IYA_STS_URL` is unset it starts the latest main branch of iya-sts in memory mode, with persistence and clustering off. It uses the host's Python and Docker and does not import this library. It binds two high ports and never binds 3000 or 8081. The nightly workflow runs the unit suite and this script once every 24 hours.
 
-PyPI publishing is not set up yet.
+A pull request merged into `main` publishes the package to PyPI after the test workflow succeeds on that commit. A direct push does not. There is no API token: PyPI Trusted Publishing trades the workflow's GitHub OIDC token for a short-lived upload token, from the `pypi` environment, and PyPI holds the publisher for this repository and `publish.yml`. A version already on PyPI stays there; the next release is a new `version` in `pyproject.toml` (and `VERSION`).
 
 ## The iya-sts trust chain (`tlsCa`)
 
