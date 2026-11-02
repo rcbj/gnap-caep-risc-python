@@ -4,12 +4,13 @@ A server-side [GNAP](https://www.rfc-editor.org/rfc/rfc9635) client. The key is 
 
 The private key stays in this process. The same `gnap.json` shape as the Node library loads: the JSON keys are identical.
 
-## Install from a checkout
+## Build and tests
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+docker build --target test .
 ```
+
+The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions uses that command. Do not run pytest on the host. The demo image does not run the suite.
 
 PyPI publishing is not set up yet.
 
@@ -38,14 +39,19 @@ done = gnap.finish_redirect(query, [started.pending.id])
 ## Demo
 
 ```bash
-python demo/app.py
+docker compose up --build
 ```
 
 `PORT` defaults to 3000 and is the bind port. Loopback finish and display URLs follow `PORT`. Any other host is left as written. `PUBLIC_URL` or `--public-url` replaces the origin and keeps the path. `GET /healthz` returns `ok`. The home page has a sign-in control; `/login` starts a grant, `/callback` finishes it, and `POST /logout` signs out.
 
-The shipped `demo/gnap.json` leaves `signals` on by omitting the key. Key material is `file:` or `env:` and is not in the tree. Generate a key with `gnap-caep-risc generate-key --config demo/gnap.json`, then register the application:
+The shipped `demo/gnap.json` leaves `signals` on by omitting the key. Key material is `file:` or `env:` and is not in the tree. Generate a key inside the demo image, then register the application:
 
 ```bash
+docker compose build
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD/demo:/app/demo" \
+  gnap-caep-risc-python-demo \
+  gnap-caep-risc generate-key --config demo/gnap.json
 ADMIN_API_CLIENT_SECRET=… python scripts/configure_iya_sts.py --config demo/gnap.json
 ```
 

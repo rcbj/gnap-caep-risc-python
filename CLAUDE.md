@@ -13,10 +13,10 @@ done = gnap.finish_redirect(query, [started.pending.id])
 ## Tests
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest
+docker build --target test .
 ```
+
+The `test` stage runs `pip install --no-cache-dir ".[dev]" && pytest` in `python:3.11-slim`. GitHub Actions uses that command. Do not run pytest on the host. The demo image does not run the suite.
 
 Tests use an in-process stub on 127.0.0.1. They do not need a live authorization server.
 
